@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import BaseModel, HttpUrl
 from datetime import datetime, timedelta
 import string, random, logging, sqlite3
 
-app = FastAPI()
+app = FastAPI(title="URL Shortener Service")
 
 # ------------------ Logging Middleware ------------------
 logger = logging.getLogger("url_shortener")
@@ -39,7 +39,7 @@ init_db()
 # ------------------ Pydantic Schema ------------------
 class URLRequest(BaseModel):
     url: HttpUrl
-    validity: int | None = None   
+    validity: int | None = None   # in minutes
     shortcode: str | None = None
 
 
@@ -47,7 +47,6 @@ class URLRequest(BaseModel):
 def generate_shortcode(length: int = 6):
     chars = string.ascii_letters + string.digits
     return ''.join(random.choices(chars, k=length))
-
 
 def get_db():
     return sqlite3.connect("urls.db")
@@ -69,6 +68,7 @@ def shorten_url(data: URLRequest):
     # Ensure shortcode is unique
     cursor.execute("SELECT id FROM urls WHERE shortcode = ?", (shortcode,))
     if cursor.fetchone():
+        conn.close()
         raise HTTPException(status_code=400, detail="Shortcode already exists")
 
     # Insert into DB
@@ -78,16 +78,19 @@ def shorten_url(data: URLRequest):
             (shortcode, str(data.url), expires_at.isoformat())
         )
         conn.commit()
-    except Exception as e:
+    except Exception:
         conn.close()
         raise HTTPException(status_code=500, detail="Database error")
 
     conn.close()
-    return {"short_url": f"http://localhost:8000/{shortcode}", "expires_at": expires_at}
+    return {
+        "short_url": f"http://localhost:8000/{shortcode}",
+        "expires_at": expires_at
+    }
 
 
 @app.get("/{shortcode}")
-def redirect_url(shortcode: str):
+def redirect_url(shortcode: str, request: Request):
     conn = get_db()
     cursor = conn.cursor()
 
@@ -101,5 +104,9 @@ def redirect_url(shortcode: str):
     original_url, expires_at = row
     if datetime.utcnow() > datetime.fromisoformat(expires_at):
         raise HTTPException(status_code=410, detail="Short URL expired")
+
+    # If request comes from Swagger UI, return JSON instead of redirect
+    if "swagger" in str(request.headers.get("user-agent", "")).lower():
+        return JSONResponse({"redirect_to": original_url})
 
     return RedirectResponse(url=original_url)
